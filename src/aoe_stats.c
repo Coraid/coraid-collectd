@@ -161,13 +161,16 @@ aoe_aoet_stats_read(void)
                 nvlist_add_int64(aliases_child, "instance", 
                     (int64_t)ksp->ks_instance)) {
                 ERROR("couldn't add to nvpair");
+                nvlist_free(aliases_child);
                 return (-1);
             }
             if (nvlist_add_nvlist(aliases, aoe_get_addr(ksp->ks_name), 
                 aliases_child)) {
                 ERROR("couldn't add child nvlist to aliases");
+                nvlist_free(aliases_child);
                 continue;
             }
+            nvlist_free(aliases_child);
         }
     }
 
@@ -324,7 +327,7 @@ aoe_aoet_stats_read(void)
         alias = nvlist_next_nvpair(aliases, alias)) {
         if (nvpair_type(alias) == DATA_TYPE_NVLIST)
             if (nvpair_value_nvlist(alias, &aliases_child) == 0)
-              nvlist_free(aliases_child);
+                nvlist_free(aliases_child);
     }
     nvlist_free(aliases);
     return (0);
@@ -388,13 +391,16 @@ aoe_atmf_stats_read(int atmf_type)
                 nvlist_add_int64(aliases_child, "instance", 
                     (int64_t)ksp->ks_instance)) {
                 ERROR("couldn't add to nvpair");
+                nvlist_free(aliases_child);
                 return (-1);
             }
             if (nvlist_add_nvlist(aliases, aoe_get_addr(ksp->ks_name), 
                 aliases_child)) {
                 ERROR("couldn't add child nvlist to aliases");
+                nvlist_free(aliases_child);
                 continue;
             }
+            nvlist_free(aliases_child);
         }
     }
 
@@ -498,12 +504,16 @@ aoe_port_stats_read(void)
             if (nvlist_add_string(aliases_child, "alias", s) ||
                 nvlist_add_int64(aliases_child, "instance", (int64_t)ksp->ks_instance)) {
                 ERROR("couldn't add to nvpair");
+                nvlist_free(aliases_child);
                 return (-1);
             }
             if (nvlist_add_nvlist(aliases, aoe_get_addr(ksp->ks_name), aliases_child)) {
+                nvlist_free(aliases_child);
                 ERROR("couldn't add child nvlist to aliases");
+                nvlist_free(aliases_child);
                 continue;
             }
+            nvlist_free(aliases_child);
         }
     }
 

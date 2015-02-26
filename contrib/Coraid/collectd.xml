@@ -17,6 +17,7 @@
       <method_context>
         <method_credential user='root' group='staff'/>
         <method_environment>
+          <envvar name='UMEM_DEBUG' value='default'/>
           <envvar name='PATH' value='/usr/bin:/usr/sbin'/>
         </method_environment>
       </method_context>
