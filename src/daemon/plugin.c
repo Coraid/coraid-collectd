@@ -77,6 +77,7 @@ struct write_queue_s
 {
 	value_list_t *vl;
 	plugin_ctx_t ctx;
+	write_queue_t *next;
 };
 
 /*
@@ -111,11 +112,9 @@ static pthread_t      *read_threads = NULL;
 static int             read_threads_num = 0;
 static cdtime_t        max_read_interval = DEFAULT_MAX_READ_INTERVAL;
 
-static write_queue_t	*write_queue;
-static int		write_queue_head;
-static int		write_queue_tail;
-static int		write_queue_length;
-static int		write_queue_size;
+static write_queue_t  *write_queue_head;
+static write_queue_t  *write_queue_tail;
+static long            write_queue_length = 0;
 static _Bool           write_loop = 1;
 static pthread_mutex_t write_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  write_cond = PTHREAD_COND_INITIALIZER;
@@ -125,6 +124,8 @@ static size_t          write_threads_num = 0;
 static pthread_key_t   plugin_ctx_key;
 static _Bool           plugin_ctx_key_initialized = 0;
 
+static long            write_limit_high = 0;
+static long            write_limit_low = 0;
 
 static derive_t        stats_values_dropped = 0;
 static _Bool           record_statistics = 0;
@@ -441,7 +442,7 @@ static void *plugin_read_thread (void __attribute__((unused)) *args)
 		if (rf == NULL)
 		{
 			pthread_cond_wait (&read_cond, &read_lock);
-			pthread_mutex_unlock (&read_lock);
+                        pthread_mutex_unlock (&read_lock);
 			continue;
 		}
 		pthread_mutex_unlock (&read_lock);
@@ -705,41 +706,38 @@ static value_list_t *plugin_value_list_clone (value_list_t const *vl_orig) /* {{
 static int plugin_write_enqueue (value_list_t const *vl) /* {{{ */
 {
 	write_queue_t *q;
-	value_list_t *vlc;
 
-	if (write_queue == NULL)
-		return (ENOMEM);	/* failed to allocate it earlier */
-
-	vlc = plugin_value_list_clone (vl);
-	if (vlc == NULL)
+	q = malloc (sizeof (*q));
+	if (q == NULL)
 		return (ENOMEM);
+	q->next = NULL;
 
-	pthread_mutex_lock (&write_lock);
-	q = &write_queue[write_queue_head];
-	assert (q->vl == NULL);
-	q->vl = vlc;
+	q->vl = plugin_value_list_clone (vl);
+	if (q->vl == NULL)
+	{
+		sfree (q);
+		return (ENOMEM);
+	}
 
 	/* Store context of caller (read plugin); otherwise, it would not be
 	 * available to the write plugins when actually dispatching the
 	 * value-list later on. */
 	q->ctx = plugin_get_ctx ();
 
-	write_queue_head = (write_queue_head+1)%write_queue_size;
-	if (write_queue_head == write_queue_tail)
+	pthread_mutex_lock (&write_lock);
+
+	if (write_queue_tail == NULL)
 	{
-		/* queue full, discard oldest entry */
-		q = &write_queue[write_queue_tail];
-		plugin_value_list_free (q->vl);
-		q->vl = NULL;
-		write_queue_tail = (write_queue_tail+1)%write_queue_size;
-		if (record_statistics) {
-			pthread_mutex_lock(&statistics_lock);
-			stats_values_dropped++;
-			pthread_mutex_unlock(&statistics_lock);
-		}
-	} else
-		write_queue_length++;
-	assert (write_queue_length <= write_queue_size);
+		write_queue_head = q;
+		write_queue_tail = q;
+		write_queue_length = 1;
+	}
+	else
+	{
+		write_queue_tail->next = q;
+		write_queue_tail = q;
+		write_queue_length += 1;
+	}
 
 	pthread_cond_signal (&write_cond);
 	pthread_mutex_unlock (&write_lock);
@@ -749,41 +747,47 @@ static int plugin_write_enqueue (value_list_t const *vl) /* {{{ */
 
 static value_list_t *plugin_write_dequeue (void) /* {{{ */
 {
-	write_queue_t *q, qv;
+	write_queue_t *q;
+	value_list_t *vl;
 
 	pthread_mutex_lock (&write_lock);
 
-	while (write_queue_head == write_queue_tail)
-	{
-		if (!write_loop)
-		{
-			pthread_mutex_unlock (&write_lock);
-			return (NULL);
-		}
+	while (write_loop && (write_queue_head == NULL))
 		pthread_cond_wait (&write_cond, &write_lock);
+
+	if (write_queue_head == NULL)
+	{
+		pthread_mutex_unlock (&write_lock);
+		return (NULL);
 	}
 
-	q = &write_queue[write_queue_tail];
-	qv = *q;
-	q->vl = NULL;
-	write_queue_tail = (write_queue_tail+1)%write_queue_size;
-	write_queue_length--;
-	assert (write_queue_length >= 0);
+	q = write_queue_head;
+	write_queue_head = q->next;
+	write_queue_length -= 1;
+	if (write_queue_head == NULL) {
+		write_queue_tail = NULL;
+		assert(0 == write_queue_length);
+		}
 
 	pthread_mutex_unlock (&write_lock);
 
-	(void) plugin_set_ctx (qv.ctx);
+	(void) plugin_set_ctx (q->ctx);
 
-	return (qv.vl);
+	vl = q->vl;
+	sfree (q);
+	return (vl);
 } /* }}} value_list_t *plugin_write_dequeue */
 
 static void *plugin_write_thread (void __attribute__((unused)) *args) /* {{{ */
 {
-	value_list_t *vl;
-
-	while ((vl = plugin_write_dequeue ()) != NULL)
+	while (write_loop)
 	{
+		value_list_t *vl = plugin_write_dequeue ();
+		if (vl == NULL)
+			continue;
+
 		plugin_dispatch_values_internal (vl);
+
 		plugin_value_list_free (vl);
 	}
 
@@ -829,6 +833,7 @@ static void start_write_threads (size_t num) /* {{{ */
 
 static void stop_write_threads (void) /* {{{ */
 {
+	write_queue_t *q;
 	int i;
 
 	if (write_threads == NULL)
@@ -855,18 +860,17 @@ static void stop_write_threads (void) /* {{{ */
 
 	pthread_mutex_lock (&write_lock);
 	i = 0;
-	while (write_queue_tail != write_queue_head)
+	for (q = write_queue_head; q != NULL; )
 	{
-		write_queue_t *q, qv;
-		q = &write_queue[write_queue_tail];
-		qv = *q;
-		q->vl = NULL;
-		plugin_value_list_free (qv.vl);
-		write_queue_tail = (write_queue_tail+1)%write_queue_size;
+		write_queue_t *q1 = q;
+		plugin_value_list_free (q->vl);
+		q = q->next;
+		sfree (q1);
 		i++;
 	}
-	write_queue_head = 0;
-	write_queue_tail = 0;
+	write_queue_head = NULL;
+	write_queue_tail = NULL;
+	write_queue_length = 0;
 	pthread_mutex_unlock (&write_lock);
 
 	if (i > 0)
@@ -1523,20 +1527,26 @@ void plugin_init_all (void)
 	chain_name = global_option_get ("PostCacheChain");
 	post_cache_chain = fc_chain_get_by_name (chain_name);
 
-	write_queue_size = global_option_get_long ("WriteQueueLimitHigh",
+	write_limit_high = global_option_get_long ("WriteQueueLimitHigh",
 			/* default = */ 100000);
-	if (write_queue_size < 0)
+	if (write_limit_high < 0)
 	{
 		ERROR ("WriteQueueLimitHigh must be positive or zero.");
-		write_queue_size = 0;
+		write_limit_high = 0;
 	}
 
-	free(write_queue);
-	write_queue = calloc (write_queue_size+1, sizeof (*write_queue));
-	if (write_queue == NULL)
+	write_limit_low = global_option_get_long ("WriteQueueLimitLow",
+			/* default = */ write_limit_high / 2);
+	if (write_limit_low < 0)
 	{
-		ERROR("plugin_init_all: allocation of write_queue failed");
-		write_queue_size = 0;
+		ERROR ("WriteQueueLimitLow must be positive or zero.");
+		write_limit_low = write_limit_high / 2;
+	}
+	else if (write_limit_low > write_limit_high)
+	{
+		ERROR ("WriteQueueLimitLow must not be larger than "
+				"WriteQueueLimitHigh.");
+		write_limit_low = write_limit_high;
 	}
 
 	write_threads_num = global_option_get_long ("WriteThreads",
@@ -1603,7 +1613,7 @@ void plugin_init_all (void)
 /* TODO: Rename this function. */
 void plugin_read_all (void)
 {
-	if (record_statistics) {
+	if(record_statistics) {
 		plugin_update_internal_statistics ();
 	}
 	uc_check_timeout ();
@@ -2061,9 +2071,86 @@ static int plugin_dispatch_values_internal (value_list_t *vl)
 	return (0);
 } /* int plugin_dispatch_values_internal */
 
+static double get_drop_probability (void) /* {{{ */
+{
+	long pos;
+	long size;
+	long wql;
+
+	pthread_mutex_lock (&write_lock);
+	wql = write_queue_length;
+	pthread_mutex_unlock (&write_lock);
+
+	if (wql < write_limit_low)
+		return (0.0);
+	if (wql >= write_limit_high)
+		return (1.0);
+
+	pos = 1 + wql - write_limit_low;
+	size = 1 + write_limit_high - write_limit_low;
+
+	return (((double) pos) / ((double) size));
+} /* }}} double get_drop_probability */
+
+static _Bool check_drop_value (void) /* {{{ */
+{
+	static cdtime_t last_message_time = 0;
+	static double last_p = 0.0;
+	static pthread_mutex_t last_message_lock = PTHREAD_MUTEX_INITIALIZER;
+
+	double p;
+	double q;
+	int status;
+
+	if (write_limit_high == 0)
+		return (0);
+
+	p = get_drop_probability ();
+	if (p == 0.0)
+	{
+		last_message_time = 0;	/* race with code just below but doesn't matter and not worth locking every datum */
+		return (0);
+	}
+
+	status = pthread_mutex_trylock (&last_message_lock);
+	if (status == 0)
+	{
+		cdtime_t now;
+
+		now = cdtime ();
+		if ((now - last_message_time) > TIME_T_TO_CDTIME_T (60) || p != last_p)
+		{
+			last_message_time = now;
+			last_p = p;
+			ERROR ("plugin_dispatch_values: Low water mark "
+					"reached. Dropping %.0f%% of metrics.",
+					100.0 * p);
+		}
+		pthread_mutex_unlock (&last_message_lock);
+	}
+
+	if (p == 1.0)
+		return (1);
+
+	q = cdrand_d ();
+	if (q > p)
+		return (1);
+	else
+		return (0);
+} /* }}} _Bool check_drop_value */
+
 int plugin_dispatch_values (value_list_t const *vl)
 {
 	int status;
+
+	if (check_drop_value ()) {
+		if(record_statistics) {
+			pthread_mutex_lock(&statistics_lock);
+			stats_values_dropped++;
+			pthread_mutex_unlock(&statistics_lock);
+		}
+		return (0);
+	}
 
 	status = plugin_write_enqueue (vl);
 	if (status != 0)
@@ -2086,6 +2173,15 @@ int plugin_dispatch_multivalue (value_list_t const *template, /* {{{ */
 	int failed = 0;
 	gauge_t sum = 0.0;
 	va_list ap;
+
+	if (check_drop_value ()) {
+		if(record_statistics) {
+			pthread_mutex_lock(&statistics_lock);
+			stats_values_dropped++;
+			pthread_mutex_unlock(&statistics_lock);
+		}
+		return (0);
+	}
 
 	assert (template->values_len == 1);
 
