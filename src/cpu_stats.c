@@ -96,6 +96,7 @@ cpu_stats_read(void)
             /* cpu_stats_derive(&vl, ksp, "bwrite", NULL); */
             /* cpu_stats_derive(&vl, ksp, "canch", NULL); */
             /* cpu_stats_derive(&vl, ksp, "cpu_load_intr", NULL); */            
+            cpu_stats_derive(&vl, ksp, "cpu_nsec_dtrace", NULL);
             cpu_stats_derive(&vl, ksp, "cpu_nsec_idle", NULL);
             cpu_stats_derive(&vl, ksp, "cpu_nsec_intr", NULL);
             cpu_stats_derive(&vl, ksp, "cpu_nsec_kernel", NULL);
