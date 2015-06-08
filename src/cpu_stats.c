@@ -120,7 +120,7 @@ cpu_stats_read(void)
             /* cpu_stats_derive(&vl, ksp, "modload", NULL); */
             /* cpu_stats_derive(&vl, ksp, "modunload", NULL); */
             /* cpu_stats_derive(&vl, ksp, "msg", NULL); */
-            /* cpu_stats_derive(&vl, ksp, "mutex_adenters", NULL); */
+            cpu_stats_derive(&vl, ksp, "mutex_adenters", NULL);
             /* cpu_stats_derive(&vl, ksp, "namei", NULL); */
             /* cpu_stats_derive(&vl, ksp, "nthreads", NULL); */
             /* cpu_stats_derive(&vl, ksp, "outch", NULL); */
@@ -134,7 +134,7 @@ cpu_stats_read(void)
             /* cpu_stats_derive(&vl, ksp, "rw_rdfails", NULL); */
             /* cpu_stats_derive(&vl, ksp, "rw_wrfails", NULL); */
             /* cpu_stats_derive(&vl, ksp, "sema", NULL); */
-            /* cpu_stats_derive(&vl, ksp, "syscall", NULL); */
+            cpu_stats_derive(&vl, ksp, "syscall", NULL);
             /* cpu_stats_derive(&vl, ksp, "sysexec", NULL); */
             /* cpu_stats_derive(&vl, ksp, "sysfork", NULL); */
             /* cpu_stats_derive(&vl, ksp, "sysread", NULL); */
